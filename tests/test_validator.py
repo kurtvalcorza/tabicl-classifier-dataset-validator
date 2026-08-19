@@ -79,6 +79,33 @@ def test_target_in_drop_columns_is_rejected(tmp_path, monkeypatch):
     assert check["successful"] is False
 
 
+def test_val_split_target_semantics_are_validated(tmp_path, monkeypatch):
+    # train labels a,b; val has too few usable rows and an unseen label c
+    pd.DataFrame({"x": range(60), "target": ["a", "b"] * 30}).to_csv(tmp_path / "train.csv", index=False)
+    pd.DataFrame({"x": range(3), "target": ["a", "b", "c"]}).to_csv(tmp_path / "val.csv", index=False)
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        checks, _ = validator.build_checks(source, {})
+    finally:
+        source.close()
+    by = {c["name"]: c["successful"] for c in checks}
+    assert by["val_has_usable_rows"] is False  # 3 rows < MIN_EVAL_ROWS
+    assert by["val_labels_subset_of_train"] is False  # 'c' unseen in train
+
+
+def test_good_val_split_passes_depth_checks(tmp_path, monkeypatch):
+    pd.DataFrame({"x": range(60), "target": ["a", "b"] * 30}).to_csv(tmp_path / "train.csv", index=False)
+    pd.DataFrame({"x": range(20), "target": ["a", "b"] * 10}).to_csv(tmp_path / "val.csv", index=False)
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        checks, _ = validator.build_checks(source, {})
+    finally:
+        source.close()
+    assert all(c["successful"] for c in checks)
+
+
 def test_high_class_count_flagged_infeasible(tmp_path, monkeypatch):
     # 400 classes, 2 rows each; passes stratifiable_classes but the finetuner's
     # stratified cap of 300 cannot represent every class -> must be flagged.

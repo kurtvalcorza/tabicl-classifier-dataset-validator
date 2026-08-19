@@ -25,6 +25,7 @@ MAX_SAMPLE_FILES = int(os.getenv("DIMER_MAX_SAMPLE_FILES", "25"))
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = int(os.getenv("DIMER_MAX_ARCHIVE_UNCOMPRESSED_BYTES", str(1 << 30)))
 MAX_SINGLE_CSV_BYTES = int(os.getenv("DIMER_MAX_SINGLE_CSV_BYTES", str(512 << 20)))
 MIN_TRAIN_ROWS = 50
+MIN_EVAL_ROWS = 10
 MAX_FEATURES = 2_000
 MAX_REASONABLE_CLASSES = 1_000
 
@@ -325,6 +326,7 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
     )
 
     train_set = set(columns)
+    train_labels = {str(v) for v in class_counts.index}
     for stem in ("val", "test"):
         try:
             entry = source.unique_csv(stem, required=False)
@@ -335,11 +337,11 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
             continue
         checks.append(_check(f"{stem}_csv_unique", True, f"Using {entry.logical_path}."))
         try:
-            sample = source.read_csv(entry, nrows=5)
+            frame = source.read_csv(entry)  # full split, not just a 5-row schema sample
         except Exception as exc:  # noqa: BLE001
             checks.append(_check(f"{stem}_csv_parses", False, f"{stem}.csv could not be parsed: {exc}"))
             continue
-        same = set(sample.columns) == train_set
+        same = set(frame.columns) == train_set
         checks.append(
             _check(
                 f"{stem}_schema_matches_train",
@@ -347,6 +349,30 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
                 f"{stem}.csv schema matches train.csv."
                 if same
                 else f"{stem}.csv columns differ from train.csv.",
+            )
+        )
+        if not same or target_column not in frame.columns:
+            continue
+        # The finetuner scores this split after training; verify its full targets
+        # are usable, not just that the header matches.
+        usable_split = frame.dropna(subset=[target_column])
+        n_usable = int(len(usable_split))
+        checks.append(
+            _check(
+                f"{stem}_has_usable_rows",
+                n_usable >= MIN_EVAL_ROWS,
+                f"{n_usable} usable {stem} rows after dropping missing targets; "
+                f"need at least {MIN_EVAL_ROWS}.",
+            )
+        )
+        unseen = sorted({str(v) for v in usable_split[target_column].unique()} - train_labels)
+        checks.append(
+            _check(
+                f"{stem}_labels_subset_of_train",
+                len(unseen) == 0,
+                f"All {stem}.csv target labels appear in train.csv."
+                if not unseen
+                else f"{stem}.csv has labels absent from train.csv: {unseen[:10]}.",
             )
         )
 
