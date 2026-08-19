@@ -82,13 +82,15 @@ def notify_done_callback() -> dict[str, Any]:
 def _normalize_member(name: str) -> str | None:
     if not name or name.endswith("/"):
         return None
-    normalized = name.replace("\\", "/").lstrip("./")
+    normalized = name.replace("\\", "/")
     parts = Path(normalized).parts
-    if any(part == ".." for part in parts):
+    # Reject absolute paths and parent-directory traversal BEFORE stripping
+    # anything (Path() has already collapsed any leading "./").
+    if normalized.startswith("/") or ".." in parts:
         raise ValueError(f"unsafe archive member: {name}")
     if len(parts) > 1 and parts[0].lower() in {"dataset", "datasets"}:
-        normalized = str(Path(*parts[1:]))
-    return normalized
+        parts = parts[1:]
+    return "/".join(parts) if parts else None
 
 
 @dataclass(frozen=True)
@@ -192,6 +194,16 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
 
     checks.append(
         _check(
+            "target_not_dropped",
+            target_column not in drop_columns,
+            f"target_column {target_column!r} must not appear in drop_columns."
+            if target_column in drop_columns
+            else f"target_column {target_column!r} is not listed in drop_columns.",
+        )
+    )
+
+    checks.append(
+        _check(
             "no_nested_zip",
             not source.has_nested_zip(),
             "No nested zip found."
@@ -265,6 +277,33 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
             "stratifiable_classes",
             n_classes >= 2 and smallest >= 2,
             f"Smallest class has {smallest} row(s); need at least 2 for a stratified holdout.",
+        )
+    )
+
+    # Split feasibility: the finetuner draws a stratified holdout (when val.csv
+    # is absent) and a stratified cap to max_train_rows. Both require every
+    # class to fit in each split side, so a high class count can validate on the
+    # shallow checks above yet deterministically fail in the finetuner.
+    val_present = len(source.candidates("val")) > 0
+    max_train_rows = max(300, min(int(preprocessing.get("max_train_rows") or 10_000), 50_000))
+    cap_effective = min(max_train_rows, usable_rows)
+    if val_present:
+        holdout_min = usable_rows  # provided val.csv is used as-is; no holdout drawn
+    else:
+        validation_split = float(
+            preprocessing.get("validation_split")
+            if preprocessing.get("validation_split") is not None
+            else 0.2
+        )
+        validation_split = min(max(validation_split, 0.05), 0.4)
+        holdout_min = int(round(min(validation_split, 1 - validation_split) * usable_rows))
+    meta.update({"maxTrainRowsEffective": cap_effective, "valSplitProvided": val_present})
+    checks.append(
+        _check(
+            "stratified_split_feasible",
+            n_classes <= cap_effective and n_classes <= holdout_min,
+            f"{n_classes} classes vs stratified cap {cap_effective} and smaller "
+            f"holdout side {holdout_min}; every class must fit in each split.",
         )
     )
 

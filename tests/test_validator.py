@@ -55,3 +55,43 @@ def test_valid_binary_dataset_passes_core_checks(tmp_path, monkeypatch):
         source.close()
     assert all(c["successful"] for c in checks)
     assert meta["classCount"] == 2
+
+
+def test_normalize_member_rejects_traversal_and_absolute():
+    assert validator._normalize_member("train.csv") == "train.csv"
+    assert validator._normalize_member("./train.csv") == "train.csv"
+    assert validator._normalize_member("dataset/train.csv") == "train.csv"
+    for hostile in ("../train.csv", "../../etc/passwd", "/train.csv", "dataset/../secret.csv"):
+        with pytest.raises(ValueError, match="unsafe archive member"):
+            validator._normalize_member(hostile)
+
+
+def test_target_in_drop_columns_is_rejected(tmp_path, monkeypatch):
+    frame = pd.DataFrame({"x": range(60), "target": ["a", "b"] * 30})
+    frame.to_csv(tmp_path / "train.csv", index=False)
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        checks, _ = validator.build_checks(source, {"target_column": "target", "drop_columns": "target,x"})
+    finally:
+        source.close()
+    check = next(c for c in checks if c["name"] == "target_not_dropped")
+    assert check["successful"] is False
+
+
+def test_high_class_count_flagged_infeasible(tmp_path, monkeypatch):
+    # 400 classes, 2 rows each; passes stratifiable_classes but the finetuner's
+    # stratified cap of 300 cannot represent every class -> must be flagged.
+    labels = [f"c{i}" for i in range(400)] * 2
+    frame = pd.DataFrame({"x": range(len(labels)), "target": labels})
+    frame.to_csv(tmp_path / "train.csv", index=False)
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        checks, _ = validator.build_checks(source, {"max_train_rows": 300})
+    finally:
+        source.close()
+    stratifiable = next(c for c in checks if c["name"] == "stratifiable_classes")
+    feasible = next(c for c in checks if c["name"] == "stratified_split_feasible")
+    assert stratifiable["successful"] is True  # old shallow check still passes
+    assert feasible["successful"] is False  # new feasibility check catches it
