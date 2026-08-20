@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import zipfile
 
@@ -5,6 +6,13 @@ import pandas as pd
 import pytest
 
 import validator
+
+
+@pytest.fixture(autouse=True)
+def _reset_limits():
+    # Re-load limits from a clean environment before each test.
+    validator._load_limits()
+    yield
 
 
 def _write_zip(path: Path, files: dict[str, str]) -> None:
@@ -55,6 +63,62 @@ def test_valid_binary_dataset_passes_core_checks(tmp_path, monkeypatch):
         source.close()
     assert all(c["successful"] for c in checks)
     assert meta["classCount"] == 2
+
+
+def test_malformed_numeric_env_yields_structured_failure(tmp_path, monkeypatch):
+    # A malformed platform limit must produce a failure result.json via main(),
+    # not crash before result/callback handling.
+    monkeypatch.setenv("DIMER_MAX_SINGLE_CSV_BYTES", "not-an-int")
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    monkeypatch.setattr(validator, "RESULT_PATH", tmp_path / "result.json")
+    assert validator.main() == 1
+    payload = json.loads((tmp_path / "result.json").read_text())
+    assert payload["successful"] is False
+
+
+def test_compression_ratio_rejected(tmp_path, monkeypatch):
+    zpath = tmp_path / "dataset.zip"
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("train.csv", "x,target\n" + ("0,0\n" * 200_000))  # highly compressible
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    with pytest.raises(ValueError, match="compression ratio"):
+        validator.DatasetSource()
+
+
+def test_row_count_limit_enforced_and_bounded(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIMER_MAX_TOTAL_ROWS", "10")
+    validator._load_limits()
+    pd.DataFrame({"x": range(60), "target": ["a", "b"] * 30}).to_csv(tmp_path / "train.csv", index=False)
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        checks, meta = validator.build_checks(source, {})
+    finally:
+        source.close()
+    names = {c["name"]: c["successful"] for c in checks}
+    assert names["row_count_within_limit"] is False
+    # early return: downstream checks did not run on a truncated frame
+    assert "target_has_multiple_classes" not in names
+    assert meta["rowCount"] == ">10"
+
+
+def test_non_finite_limit_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIMER_MAX_COMPRESSION_RATIO", "inf")
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    monkeypatch.setattr(validator, "RESULT_PATH", tmp_path / "result.json")
+    assert validator.main() == 1
+    assert json.loads((tmp_path / "result.json").read_text())["successful"] is False
+
+
+def test_invalid_timeout_does_not_corrupt_global(monkeypatch):
+    # A bad timeout must not leave an invalid CALLBACK_TIMEOUT_SECONDS global,
+    # because the crash-path failure callback uses it.
+    monkeypatch.setenv("DIMER_CALLBACK_TIMEOUT_SECONDS", "-5")
+    prior = validator.CALLBACK_TIMEOUT_SECONDS
+    with pytest.raises(ValueError):
+        validator._load_limits()
+    assert validator.CALLBACK_TIMEOUT_SECONDS == prior
+    assert validator.CALLBACK_TIMEOUT_SECONDS > 0
 
 
 def test_normalize_member_rejects_traversal_and_absolute():
