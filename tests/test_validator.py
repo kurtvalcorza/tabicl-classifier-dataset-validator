@@ -110,6 +110,17 @@ def test_non_finite_limit_rejected(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "result.json").read_text())["successful"] is False
 
 
+def test_invalid_timeout_does_not_corrupt_global(monkeypatch):
+    # A bad timeout must not leave an invalid CALLBACK_TIMEOUT_SECONDS global,
+    # because the crash-path failure callback uses it.
+    monkeypatch.setenv("DIMER_CALLBACK_TIMEOUT_SECONDS", "-5")
+    prior = validator.CALLBACK_TIMEOUT_SECONDS
+    with pytest.raises(ValueError):
+        validator._load_limits()
+    assert validator.CALLBACK_TIMEOUT_SECONDS == prior
+    assert validator.CALLBACK_TIMEOUT_SECONDS > 0
+
+
 def test_normalize_member_rejects_traversal_and_absolute():
     assert validator._normalize_member("train.csv") == "train.csv"
     assert validator._normalize_member("./train.csv") == "train.csv"
