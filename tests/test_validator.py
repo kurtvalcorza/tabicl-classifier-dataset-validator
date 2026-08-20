@@ -85,17 +85,29 @@ def test_compression_ratio_rejected(tmp_path, monkeypatch):
         validator.DatasetSource()
 
 
-def test_row_count_limit_enforced(tmp_path, monkeypatch):
+def test_row_count_limit_enforced_and_bounded(tmp_path, monkeypatch):
     monkeypatch.setenv("DIMER_MAX_TOTAL_ROWS", "10")
     validator._load_limits()
     pd.DataFrame({"x": range(60), "target": ["a", "b"] * 30}).to_csv(tmp_path / "train.csv", index=False)
     monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
     source = validator.DatasetSource()
     try:
-        checks, _ = validator.build_checks(source, {})
+        checks, meta = validator.build_checks(source, {})
     finally:
         source.close()
-    assert not next(c for c in checks if c["name"] == "row_count_within_limit")["successful"]
+    names = {c["name"]: c["successful"] for c in checks}
+    assert names["row_count_within_limit"] is False
+    # early return: downstream checks did not run on a truncated frame
+    assert "target_has_multiple_classes" not in names
+    assert meta["rowCount"] == ">10"
+
+
+def test_non_finite_limit_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIMER_MAX_COMPRESSION_RATIO", "inf")
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    monkeypatch.setattr(validator, "RESULT_PATH", tmp_path / "result.json")
+    assert validator.main() == 1
+    assert json.loads((tmp_path / "result.json").read_text())["successful"] is False
 
 
 def test_normalize_member_rejects_traversal_and_absolute():
