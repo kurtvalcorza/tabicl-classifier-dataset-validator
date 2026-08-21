@@ -488,7 +488,12 @@ def run() -> int:
             "checks": checks,
             "metadata": {
                 "template": TEMPLATE_NAME,
-                "taskType": pipeline_metadata.get("taskType", "tabular_classification"),
+                # DIMER injects the resolved task via DIMER_PIPELINE_METADATA_JSON;
+                # for Custom/Other pipelines that omit it, fall back to the baked
+                # DIMER_TASK_TYPE env, then the model-family literal.
+                "taskType": pipeline_metadata.get("taskType")
+                or os.getenv("DIMER_TASK_TYPE")
+                or "tabular_classification",
                 **check_meta,
             },
         }
