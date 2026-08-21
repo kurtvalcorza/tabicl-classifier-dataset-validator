@@ -25,6 +25,7 @@ MIN_TRAIN_ROWS = 50
 MIN_EVAL_ROWS = 10
 MAX_FEATURES = 2_000
 MAX_REASONABLE_CLASSES = 1_000
+MAX_CLASSNAMES = 1_000
 
 # Numeric/limit configuration. These are module-level DEFAULTS (plain literals so
 # import never fails); the values actually used are (re)loaded from the
@@ -257,7 +258,9 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
         if c.strip()
     ]
     checks: list[dict[str, Any]] = []
-    meta: dict[str, Any] = {"targetColumn": target_column, "dropColumns": drop_columns}
+    # classNames is a mandatory DIMER metadata field (Workbench uses it for
+    # preprocessing). Always present, even on an early-return failure path.
+    meta: dict[str, Any] = {"targetColumn": target_column, "dropColumns": drop_columns, "classNames": []}
 
     checks.append(
         _check(
@@ -341,6 +344,13 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
     smallest = int(class_counts.min()) if n_classes else 0
     meta["classCount"] = n_classes
     meta["smallestClassRows"] = smallest
+    # Stringify before sorting so mixed-type labels (e.g. ints and strings)
+    # never raise a TypeError; cap the emitted list so a high-cardinality target
+    # cannot bloat result.json (classCount still reports the true count).
+    class_labels = sorted(str(c) for c in class_counts.index)
+    meta["classNames"] = class_labels[:MAX_CLASSNAMES]
+    if len(class_labels) > MAX_CLASSNAMES:
+        meta["classNamesTruncated"] = True
     checks.append(
         _check(
             "target_has_multiple_classes",
@@ -485,7 +495,12 @@ def run() -> int:
             "checks": checks,
             "metadata": {
                 "template": TEMPLATE_NAME,
-                "taskType": pipeline_metadata.get("taskType", "tabular_classification"),
+                # DIMER injects the resolved task via DIMER_PIPELINE_METADATA_JSON;
+                # for Custom/Other pipelines that omit it, fall back to the baked
+                # DIMER_TASK_TYPE env, then the model-family literal.
+                "taskType": pipeline_metadata.get("taskType")
+                or os.getenv("DIMER_TASK_TYPE")
+                or "tabular_classification",
                 **check_meta,
             },
         }
@@ -508,7 +523,7 @@ def main() -> int:
                 "message": str(exc),
                 "traceback": traceback.format_exc(),
             },
-            "metadata": {"template": TEMPLATE_NAME},
+            "metadata": {"template": TEMPLATE_NAME, "classNames": []},
         }
         try:
             write_result(payload)

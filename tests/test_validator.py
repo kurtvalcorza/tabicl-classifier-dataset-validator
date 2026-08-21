@@ -194,3 +194,70 @@ def test_validate_entrypoint_delegates_to_validator():
     import validate
 
     assert validate.main is validator.main
+
+
+def test_classnames_emitted_in_metadata(tmp_path, monkeypatch):
+    # DIMER Workbench requires classNames in validator metadata (mandatory field).
+    pd.DataFrame({"x": range(60), "target": (["cat", "dog", "bird"] * 20)}).to_csv(
+        tmp_path / "train.csv", index=False
+    )
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        _checks, meta = validator.build_checks(source, {})
+    finally:
+        source.close()
+    assert meta["classNames"] == ["bird", "cat", "dog"]
+    assert meta["classCount"] == 3
+
+
+def test_classnames_present_even_on_early_failure(tmp_path, monkeypatch):
+    # A dataset with no train.csv fails early; classNames must still be present
+    # (the "even if empty" contract) so Workbench never sees a missing key.
+    (tmp_path / "notes.txt").write_text("no csv here")
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        _checks, meta = validator.build_checks(source, {})
+    finally:
+        source.close()
+    assert meta["classNames"] == []
+
+
+def test_tasktype_fallback_chain(tmp_path, monkeypatch):
+    # taskType resolves DIMER metadata -> baked DIMER_TASK_TYPE env -> literal.
+    pd.DataFrame({"x": range(60), "target": ["a", "b"] * 30}).to_csv(tmp_path / "train.csv", index=False)
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    monkeypatch.setattr(validator, "RESULT_PATH", tmp_path / "result.json")
+    monkeypatch.delenv("DIMER_PIPELINE_METADATA_JSON", raising=False)
+    monkeypatch.setenv("DIMER_TASK_TYPE", "baked_type")
+    validator.main()
+    assert json.loads((tmp_path / "result.json").read_text())["metadata"]["taskType"] == "baked_type"
+    monkeypatch.setenv("DIMER_PIPELINE_METADATA_JSON", '{"taskType": "from_metadata"}')
+    validator.main()
+    assert json.loads((tmp_path / "result.json").read_text())["metadata"]["taskType"] == "from_metadata"
+
+
+def test_classnames_present_on_crash_metadata(monkeypatch, tmp_path):
+    # An uncaught crash (run() raises) must still emit classNames in metadata.
+    monkeypatch.setattr(validator, "RESULT_PATH", tmp_path / "result.json")
+
+    def boom() -> int:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(validator, "run", boom)
+    assert validator.main() == 1
+    meta = json.loads((tmp_path / "result.json").read_text())["metadata"]
+    assert meta["classNames"] == []
+
+
+def test_classnames_mixed_type_labels_sort_safely(tmp_path, monkeypatch):
+    # Mixed int/str labels must not raise and must serialize as strings.
+    pd.DataFrame({"x": range(60), "target": ([1, "b", 3] * 20)}).to_csv(tmp_path / "train.csv", index=False)
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        _checks, meta = validator.build_checks(source, {})
+    finally:
+        source.close()
+    assert meta["classNames"] == sorted(str(c) for c in (1, "b", 3))
