@@ -186,3 +186,11 @@ def test_high_class_count_flagged_infeasible(tmp_path, monkeypatch):
     feasible = next(c for c in checks if c["name"] == "stratified_split_feasible")
     assert stratifiable["successful"] is True  # old shallow check still passes
     assert feasible["successful"] is False  # new feasibility check catches it
+
+
+def test_validate_entrypoint_delegates_to_validator():
+    # The DIMER-facing `validate.py` entrypoint must expose the same `main` as
+    # the `validator.py` implementation module (no behavioral fork).
+    import validate
+
+    assert validate.main is validator.main
