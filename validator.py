@@ -257,7 +257,9 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
         if c.strip()
     ]
     checks: list[dict[str, Any]] = []
-    meta: dict[str, Any] = {"targetColumn": target_column, "dropColumns": drop_columns}
+    # classNames is a mandatory DIMER metadata field (Workbench uses it for
+    # preprocessing). Always present, even on an early-return failure path.
+    meta: dict[str, Any] = {"targetColumn": target_column, "dropColumns": drop_columns, "classNames": []}
 
     checks.append(
         _check(
@@ -341,6 +343,7 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
     smallest = int(class_counts.min()) if n_classes else 0
     meta["classCount"] = n_classes
     meta["smallestClassRows"] = smallest
+    meta["classNames"] = [str(c) for c in sorted(class_counts.index.tolist())]
     checks.append(
         _check(
             "target_has_multiple_classes",

@@ -194,3 +194,31 @@ def test_validate_entrypoint_delegates_to_validator():
     import validate
 
     assert validate.main is validator.main
+
+
+def test_classnames_emitted_in_metadata(tmp_path, monkeypatch):
+    # DIMER Workbench requires classNames in validator metadata (mandatory field).
+    pd.DataFrame({"x": range(60), "target": (["cat", "dog", "bird"] * 20)}).to_csv(
+        tmp_path / "train.csv", index=False
+    )
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        _checks, meta = validator.build_checks(source, {})
+    finally:
+        source.close()
+    assert meta["classNames"] == ["bird", "cat", "dog"]
+    assert meta["classCount"] == 3
+
+
+def test_classnames_present_even_on_early_failure(tmp_path, monkeypatch):
+    # A dataset with no train.csv fails early; classNames must still be present
+    # (the "even if empty" contract) so Workbench never sees a missing key.
+    (tmp_path / "notes.txt").write_text("no csv here")
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        _checks, meta = validator.build_checks(source, {})
+    finally:
+        source.close()
+    assert meta["classNames"] == []
