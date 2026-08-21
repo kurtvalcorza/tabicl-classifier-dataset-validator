@@ -25,6 +25,7 @@ MIN_TRAIN_ROWS = 50
 MIN_EVAL_ROWS = 10
 MAX_FEATURES = 2_000
 MAX_REASONABLE_CLASSES = 1_000
+MAX_CLASSNAMES = 1_000
 
 # Numeric/limit configuration. These are module-level DEFAULTS (plain literals so
 # import never fails); the values actually used are (re)loaded from the
@@ -343,7 +344,13 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
     smallest = int(class_counts.min()) if n_classes else 0
     meta["classCount"] = n_classes
     meta["smallestClassRows"] = smallest
-    meta["classNames"] = [str(c) for c in sorted(class_counts.index.tolist())]
+    # Stringify before sorting so mixed-type labels (e.g. ints and strings)
+    # never raise a TypeError; cap the emitted list so a high-cardinality target
+    # cannot bloat result.json (classCount still reports the true count).
+    class_labels = sorted(str(c) for c in class_counts.index)
+    meta["classNames"] = class_labels[:MAX_CLASSNAMES]
+    if len(class_labels) > MAX_CLASSNAMES:
+        meta["classNamesTruncated"] = True
     checks.append(
         _check(
             "target_has_multiple_classes",
@@ -516,7 +523,7 @@ def main() -> int:
                 "message": str(exc),
                 "traceback": traceback.format_exc(),
             },
-            "metadata": {"template": TEMPLATE_NAME},
+            "metadata": {"template": TEMPLATE_NAME, "classNames": []},
         }
         try:
             write_result(payload)
