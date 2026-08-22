@@ -98,6 +98,20 @@ def _json_env(name: str) -> dict[str, Any]:
     return value
 
 
+def _resolve_task_type(literal_default: str) -> str:
+    """taskType: DIMER metadata -> baked DIMER_TASK_TYPE env -> model literal.
+
+    Reads DIMER_PIPELINE_METADATA_JSON defensively so it is also safe to call
+    from the crash path (a malformed value there must not mask the original
+    error), keeping crash-result metadata consistent with the normal result.
+    """
+    try:
+        task = _json_env("DIMER_PIPELINE_METADATA_JSON").get("taskType")
+    except Exception:  # noqa: BLE001
+        task = None
+    return task or os.getenv("DIMER_TASK_TYPE") or literal_default
+
+
 def log(message: str) -> None:
     print(f"[{TEMPLATE_NAME}] {message}", flush=True)
 
@@ -250,6 +264,34 @@ def _check(name: str, successful: bool, message: str) -> dict[str, Any]:
     return {"name": name, "successful": bool(successful), "message": message}
 
 
+def _regression_pipeline_hint(target: pd.Series, usable_rows: int, n_classes: int) -> str | None:
+    """Conservatively detect a target that is really a regression target.
+
+    Only fires ABOVE the class-count limit AND when the target is fully numeric
+    with either non-integer values or near-unique values. Ordinary integer-coded
+    classification labels (few classes, or many repeated integer codes) are never
+    flagged, so current classification semantics are preserved.
+    """
+    if n_classes <= MAX_REASONABLE_CLASSES:
+        return None
+    numeric = pd.to_numeric(target, errors="coerce")
+    if int(numeric.notna().sum()) != int(target.notna().sum()):
+        return None  # some labels are non-numeric -> genuinely categorical
+    finite = numeric.dropna()
+    if finite.empty:
+        return None
+    has_non_integer = bool((finite != finite.round()).any())
+    near_unique = usable_rows > 0 and (int(finite.nunique()) / usable_rows) >= 0.9
+    if not (has_non_integer or near_unique):
+        return None
+    detail = "non-integer values" if has_non_integer else "nearly unique values"
+    return (
+        f"Target is numeric with very high cardinality ({n_classes} distinct "
+        f"values, {detail}), which is characteristic of a regression target. If "
+        "this column is continuous, use the TabICLv2 regression pipeline instead."
+    )
+
+
 def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     target_column = str(preprocessing.get("target_column") or "target").strip()
     drop_columns = [
@@ -366,6 +408,12 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
             "TabICLv2 supports many-class classification, but extreme cardinality should be reviewed.",
         )
     )
+    # Wrong-pipeline guidance (DIMER debugging guide): when a clearly
+    # regression-like target trips the class-count limit, point the user at the
+    # regression pipeline instead of leaving only a bare cardinality failure.
+    regression_hint = _regression_pipeline_hint(usable[target_column], usable_rows, n_classes)
+    if regression_hint is not None:
+        checks.append(_check("pipeline_selection", False, regression_hint))
     checks.append(
         _check(
             "stratifiable_classes",
@@ -505,32 +553,47 @@ def run() -> int:
             },
         }
         write_result(payload)
-        log(f"Callback: {json.dumps(notify_done_callback(), sort_keys=True)}")
         return 0 if successful else 1
     finally:
         source.close()
 
 
 def main() -> int:
+    # Deliver the done-callback from an OUTER finally so it is attempted exactly
+    # once on EVERY path — success, validation failure, unexpected crash, and
+    # even when write_result() itself raises (broken/read-only/full result
+    # mount). Otherwise DIMER's UI can hang at "Validating..." (docs: callback
+    # timeout). Callback delivery is best-effort and never masks the exit code.
     try:
-        return run()
-    except Exception as exc:  # noqa: BLE001
-        payload = {
-            "successful": False,
-            "message": "TabICLv2 dataset validator crashed.",
-            "error": {
-                "type": type(exc).__name__,
-                "message": str(exc),
-                "traceback": traceback.format_exc(),
-            },
-            "metadata": {"template": TEMPLATE_NAME, "classNames": []},
-        }
         try:
-            write_result(payload)
-            notify_done_callback()
-        except Exception as write_exc:  # noqa: BLE001
-            log(f"Failed to persist crash result: {write_exc}")
-        return 1
+            return run()
+        except Exception as exc:  # noqa: BLE001
+            payload = {
+                "successful": False,
+                "message": "TabICLv2 dataset validator crashed.",
+                "error": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                    "traceback": traceback.format_exc(),
+                },
+                # Preserve the taskType fallback chain so crash-result metadata
+                # stays consistent with the normal result.
+                "metadata": {
+                    "template": TEMPLATE_NAME,
+                    "taskType": _resolve_task_type("tabular_classification"),
+                    "classNames": [],
+                },
+            }
+            try:
+                write_result(payload)
+            except Exception as write_exc:  # noqa: BLE001
+                log(f"Failed to persist crash result: {write_exc}")
+            return 1
+    finally:
+        try:
+            log(f"Callback: {json.dumps(notify_done_callback(), sort_keys=True)}")
+        except Exception as cb_exc:  # noqa: BLE001
+            log(f"Callback delivery (best-effort) failed: {cb_exc}")
 
 
 if __name__ == "__main__":
