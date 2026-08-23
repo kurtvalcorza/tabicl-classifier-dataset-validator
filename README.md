@@ -23,5 +23,7 @@ fit in both the stratified cap and the smaller holdout side.
 
 The validator reports pass/fail per check in `result.json` and rejects duplicate split candidates,
 nested zips, path-traversal members, and oversized / zip-bomb archives (≤1 GiB uncompressed,
-≤512 MiB per CSV, compression-ratio guard). All limits are overridable by platform environment
-variables. See the project's dataset specification for the full rules.
+≤512 MiB per CSV, compression-ratio guard). The archive/resource guards (uncompressed size,
+per-CSV size, compression ratio, total-row cap) are overridable by platform environment variables;
+the usable-row, feature, and class thresholds are fixed operational limits. See the project's
+dataset specification for the full rules.
